@@ -1,12 +1,12 @@
 -- Конфигурация
 local CONFIG = {
     PETS_TO_FIND = {
-        "Golden Cat",
-        "Rainbow Dragon", 
-        "Crystal Unicorn",
-        "Shadow Wolf"
+        "Unicorn",
+        "Raccon", 
+        "Bear",
+        "Golden Dragonfly"
     },
-    DISCORD_WEBHOOK = "https://discord.com/api/webhooks/ВАШ_ВЕБХУК_ЗДЕСЬ",
+    DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1518242813605838994/cLUCW7ZvazCKK6mFn2KvVb5CZmYgAynx-5F9JFaCwpXnppCKs5J3LG9mtZLWlfGXSo51",
     SERVER_HOP_DELAY = 3,
     PET_PURCHASE_RANGE = 10,
     HOLD_E_DURATION = 2
