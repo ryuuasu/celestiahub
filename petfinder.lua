@@ -12,7 +12,8 @@ local CONFIG = {
         "Bear",
         "Unicorn", 
         "Golden Dragonfly",
-        "Raccon"
+        "Raccon",
+        "Bunny"
     },
     SCAN_INTERVAL = 5,
     MAX_SERVERS_TO_SCAN = 50,
