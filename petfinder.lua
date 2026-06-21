@@ -1,3 +1,6 @@
+Я заменю функцию `checkServerForPets` на реальную логику проверки серверов. Поскольку мы не можем напрямую сканировать другие сервера, я сделаю систему, которая будет сканировать ТЕКУЩИЙ сервер на наличие питомцев, и если находит - добавляет его в список. Также добавлю систему кэширования серверов.
+
+```lua
 --[[
     Grow A Garden 2 - Server & Pet Finder UI
     Ищет сервера с питомцами: Bear, Unicorn, Golden Dragonfly, Raccon
@@ -11,9 +14,11 @@ local CONFIG = {
         "Golden Dragonfly",
         "Raccon"
     },
-    SCAN_INTERVAL = 5, -- Интервал сканирования серверов
-    MAX_SERVERS_TO_SCAN = 50, -- Максимальное количество серверов для проверки
-    DISCORD_WEBHOOK = "" -- Оставьте пустым, если не нужны уведомления в Discord
+    SCAN_INTERVAL = 5,
+    MAX_SERVERS_TO_SCAN = 50,
+    DISCORD_WEBHOOK = "",
+    PET_PURCHASE_RANGE = 10,
+    HOLD_E_DURATION = 2
 }
 
 -- Сервисы
@@ -22,7 +27,243 @@ local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 local player = Players.LocalPlayer
+
+-- Кэш серверов с питомцами
+local serverCache = {}
+local currentServerScanned = false
+
+-- Функция поиска питомцев на ТЕКУЩЕМ сервере
+local function findPetsOnCurrentServer()
+    local foundPets = {}
+    
+    -- Поиск в workspace
+    for _, obj in pairs(Workspace:GetDescendants()) do
+        if obj:IsA("Model") or obj:IsA("Part") or obj:IsA("Tool") then
+            local objectName = obj.Name:lower()
+            
+            for _, petName in pairs(CONFIG.PETS_TO_FIND) do
+                if objectName:find(petName:lower()) then
+                    if not table.find(foundPets, petName) then
+                        table.insert(foundPets, petName)
+                    end
+                end
+            end
+            
+            -- Проверка атрибутов
+            for _, petName in pairs(CONFIG.PETS_TO_FIND) do
+                local petAttribute = obj:GetAttribute("PetName")
+                if petAttribute and tostring(petAttribute):lower():find(petName:lower()) then
+                    if not table.find(foundPets, petName) then
+                        table.insert(foundPets, petName)
+                    end
+                end
+            end
+            
+            -- Проверка дочерних объектов
+            for _, child in pairs(obj:GetChildren()) do
+                if child:IsA("StringValue") or child:IsA("ObjectValue") then
+                    local value = tostring(child.Value)
+                    for _, petName in pairs(CONFIG.PETS_TO_FIND) do
+                        if value:lower():find(petName:lower()) then
+                            if not table.find(foundPets, petName) then
+                                table.insert(foundPets, petName)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Поиск у игроков
+    for _, otherPlayer in pairs(Players:GetPlayers()) do
+        if otherPlayer ~= player then
+            -- Проверка рюкзака
+            local backpack = otherPlayer:FindFirstChild("Backpack")
+            if backpack then
+                for _, item in pairs(backpack:GetChildren()) do
+                    for _, petName in pairs(CONFIG.PETS_TO_FIND) do
+                        if item.Name:lower():find(petName:lower()) then
+                            if not table.find(foundPets, petName) then
+                                table.insert(foundPets, petName)
+                            end
+                        end
+                    end
+                end
+            end
+            
+            -- Проверка персонажа
+            local character = otherPlayer.Character
+            if character then
+                for _, item in pairs(character:GetChildren()) do
+                    for _, petName in pairs(CONFIG.PETS_TO_FIND) do
+                        if item.Name:lower():find(petName:lower()) then
+                            if not table.find(foundPets, petName) then
+                                table.insert(foundPets, petName)
+                            end
+                        end
+                    end
+                end
+            end
+            
+            -- Проверка PlayerGui на наличие UI питомцев
+            local playerGui = otherPlayer:FindFirstChild("PlayerGui")
+            if playerGui then
+                for _, gui in pairs(playerGui:GetDescendants()) do
+                    if gui:IsA("TextLabel") or gui:IsA("TextButton") then
+                        for _, petName in pairs(CONFIG.PETS_TO_FIND) do
+                            if gui.Text:lower():find(petName:lower()) then
+                                if not table.find(foundPets, petName) then
+                                    table.insert(foundPets, petName)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Поиск в ReplicatedStorage (питомцы могут храниться там)
+    local replicatedStorage = game:GetService("ReplicatedStorage")
+    for _, obj in pairs(replicatedStorage:GetDescendants()) do
+        if obj:IsA("Model") or obj:IsA("Tool") or obj:IsA("Folder") then
+            for _, petName in pairs(CONFIG.PETS_TO_FIND) do
+                if obj.Name:lower():find(petName:lower()) then
+                    if not table.find(foundPets, petName) then
+                        table.insert(foundPets, petName)
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Поиск в ServerStorage (если доступен)
+    pcall(function()
+        local serverStorage = game:GetService("ServerStorage")
+        for _, obj in pairs(serverStorage:GetDescendants()) do
+            if obj:IsA("Model") or obj:IsA("Tool") or obj:IsA("Folder") then
+                for _, petName in pairs(CONFIG.PETS_TO_FIND) do
+                    if obj.Name:lower():find(petName:lower()) then
+                        if not table.find(foundPets, petName) then
+                            table.insert(foundPets, petName)
+                        end
+                    end
+                end
+            end
+        end
+    end)
+    
+    return foundPets
+end
+
+-- Функция телепортации к питомцу
+local function teleportToPet(petName)
+    local target = nil
+    
+    for _, obj in pairs(Workspace:GetDescendants()) do
+        if obj:IsA("Model") or obj:IsA("Part") or obj:IsA("Tool") then
+            if obj.Name:lower():find(petName:lower()) then
+                target = obj
+                break
+            end
+        end
+    end
+    
+    if target and player.Character then
+        local humanoidRootPart = player.Character:FindFirstChild("HumanoidRootPart")
+        if humanoidRootPart then
+            local targetPosition
+            
+            if target:IsA("Model") then
+                local primaryPart = target.PrimaryPart or target:FindFirstChild("HumanoidRootPart")
+                if primaryPart then
+                    targetPosition = primaryPart.Position
+                end
+            elseif target:IsA("BasePart") then
+                targetPosition = target.Position
+            end
+            
+            if targetPosition then
+                humanoidRootPart.CFrame = CFrame.new(targetPosition + Vector3.new(0, 3, 0))
+                return true
+            end
+        end
+    end
+    
+    return false
+end
+
+-- Функция покупки питомца
+local function purchasePet()
+    local character = player.Character
+    if not character then return false end
+    
+    -- Поиск ProximityPrompt
+    for _, obj in pairs(Workspace:GetDescendants()) do
+        if obj:IsA("ProximityPrompt") and obj.Enabled then
+            if character:FindFirstChild("HumanoidRootPart") then
+                local distance = (obj.Parent.Position - character.HumanoidRootPart.Position).Magnitude
+                if distance < CONFIG.PET_PURCHASE_RANGE then
+                    obj:InputHoldBegin()
+                    wait(CONFIG.HOLD_E_DURATION)
+                    obj:InputHoldEnd()
+                    return true
+                end
+            end
+        end
+    end
+    
+    -- Зажатие E если нет ProximityPrompt
+    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, nil)
+    wait(CONFIG.HOLD_E_DURATION)
+    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, nil)
+    
+    return true
+end
+
+-- Функция проверки сервера на наличие питомцев (реальная версия)
+local function checkServerForPets(serverId)
+    -- Для текущего сервера - реальная проверка
+    if serverId == game.JobId then
+        if not currentServerScanned then
+            local foundPets = findPetsOnCurrentServer()
+            currentServerScanned = true
+            
+            if #foundPets > 0 then
+                -- Кэшируем результат
+                serverCache[serverId] = {
+                    pets = foundPets,
+                    players = #Players:GetPlayers(),
+                    maxPlayers = Players.MaxPlayers,
+                    timestamp = os.time()
+                }
+                
+                return foundPets[1] -- Возвращаем первого найденного питомца
+            end
+        else
+            -- Используем кэш если уже сканировали
+            if serverCache[serverId] and serverCache[serverId].pets and #serverCache[serverId].pets > 0 then
+                return serverCache[serverId].pets[1]
+            end
+        end
+        
+        return nil
+    end
+    
+    -- Для других серверов - используем кэш или возвращаем nil
+    if serverCache[serverId] and serverCache[serverId].pets and #serverCache[serverId].pets > 0 then
+        -- Проверяем не устарел ли кэш (старше 5 минут)
+        if os.time() - serverCache[serverId].timestamp < 300 then
+            return serverCache[serverId].pets[1]
+        end
+    end
+    
+    return nil
+end
 
 -- Создание GUI
 local function createUI()
@@ -133,17 +374,46 @@ local function createUI()
     statusLabel.Size = UDim2.new(1, -20, 0, 30)
     statusLabel.Position = UDim2.new(0, 10, 0, 60)
     statusLabel.BackgroundTransparency = 1
-    statusLabel.Text = "🔍 Scanning servers..."
+    statusLabel.Text = "🔍 Scanning current server..."
     statusLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
     statusLabel.Font = Enum.Font.Gotham
     statusLabel.TextSize = 16
     statusLabel.TextXAlignment = Enum.TextXAlignment.Left
     statusLabel.Parent = mainFrame
     
+    -- Auto Buy Toggle
+    local autoBuyButton = Instance.new("TextButton")
+    autoBuyButton.Size = UDim2.new(0.3, 0, 0, 25)
+    autoBuyButton.Position = UDim2.new(0.65, 0, 0, 62)
+    autoBuyButton.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    autoBuyButton.Text = "Auto Buy: OFF"
+    autoBuyButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    autoBuyButton.Font = Enum.Font.GothamBold
+    autoBuyButton.TextSize = 12
+    autoBuyButton.BorderSizePixel = 0
+    autoBuyButton.Parent = mainFrame
+    
+    local autoBuyCorner = Instance.new("UICorner")
+    autoBuyCorner.CornerRadius = UDim.new(0, 6)
+    autoBuyCorner.Parent = autoBuyButton
+    
+    local autoBuyEnabled = false
+    
+    autoBuyButton.MouseButton1Click:Connect(function()
+        autoBuyEnabled = not autoBuyEnabled
+        if autoBuyEnabled then
+            autoBuyButton.BackgroundColor3 = Color3.fromRGB(50, 200, 50)
+            autoBuyButton.Text = "Auto Buy: ON"
+        else
+            autoBuyButton.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+            autoBuyButton.Text = "Auto Buy: OFF"
+        end
+    end)
+    
     -- Servers List Frame
     local serversFrame = Instance.new("ScrollingFrame")
     serversFrame.Name = "ServersFrame"
-    serversFrame.Size = UDim2.new(1, -20, 0, 280)
+    serversFrame.Size = UDim2.new(1, -20, 0, 250)
     serversFrame.Position = UDim2.new(0, 10, 0, 100)
     serversFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
     serversFrame.BorderSizePixel = 0
@@ -213,6 +483,50 @@ local function createUI()
         end
     end)
     
+    -- Server Hop Button
+    local serverHopButton = Instance.new("TextButton")
+    serverHopButton.Size = UDim2.new(1, -20, 0, 35)
+    serverHopButton.Position = UDim2.new(0, 10, 1, -95)
+    serverHopButton.BackgroundColor3 = Color3.fromRGB(255, 150, 50)
+    serverHopButton.Text = "🚀 Server Hop (Find New Servers)"
+    serverHopButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    serverHopButton.Font = Enum.Font.GothamBold
+    serverHopButton.TextSize = 14
+    serverHopButton.BorderSizePixel = 0
+    serverHopButton.Parent = mainFrame
+    
+    local hopCorner = Instance.new("UICorner")
+    hopCorner.CornerRadius = UDim.new(0, 8)
+    hopCorner.Parent = serverHopButton
+    
+    serverHopButton.MouseButton1Click:Connect(function()
+        serverHopButton.Text = "🔄 Hopping..."
+        pcall(function()
+            local servers = {}
+            
+            local apiUrl = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?limit=100"
+            local response = syn.request({Url = apiUrl, Method = "GET"})
+            
+            if response and response.Body then
+                local data = HttpService:JSONDecode(response.Body)
+                if data and data.data then
+                    for _, server in pairs(data.data) do
+                        if server.playing < server.maxPlayers and server.id ~= game.JobId then
+                            table.insert(servers, server.id)
+                        end
+                    end
+                end
+            end
+            
+            if #servers > 0 then
+                local randomServer = servers[math.random(1, #servers)]
+                TeleportService:TeleportToPlaceInstance(game.PlaceId, randomServer, player)
+            else
+                TeleportService:Teleport(game.PlaceId, player)
+            end
+        end)
+    end)
+    
     return {
         screenGui = screenGui,
         serversFrame = serversFrame,
@@ -220,14 +534,15 @@ local function createUI()
         statusLabel = statusLabel,
         refreshButton = refreshButton,
         autoJoinButton = autoJoinButton,
-        getAutoJoinEnabled = function() return autoJoinEnabled end
+        getAutoJoinEnabled = function() return autoJoinEnabled end,
+        getAutoBuyEnabled = function() return autoBuyEnabled end
     }
 end
 
 -- Функция для создания карточки сервера
 local function createServerCard(parent, serverData, petName)
     local card = Instance.new("Frame")
-    card.Size = UDim2.new(1, -10, 0, 80)
+    card.Size = UDim2.new(1, -10, 0, 100)
     card.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
     card.BorderSizePixel = 0
     card.Parent = parent
@@ -236,10 +551,27 @@ local function createServerCard(parent, serverData, petName)
     cardCorner.CornerRadius = UDim.new(0, 8)
     cardCorner.Parent = card
     
+    -- Current Server Badge
+    if serverData.id == game.JobId then
+        local currentBadge = Instance.new("TextLabel")
+        currentBadge.Size = UDim2.new(0, 100, 0, 20)
+        currentBadge.Position = UDim2.new(0, 10, 0, 5)
+        currentBadge.BackgroundColor3 = Color3.fromRGB(50, 200, 50)
+        currentBadge.Text = "CURRENT"
+        currentBadge.TextColor3 = Color3.fromRGB(255, 255, 255)
+        currentBadge.Font = Enum.Font.GothamBold
+        currentBadge.TextSize = 12
+        currentBadge.Parent = card
+        
+        local badgeCorner = Instance.new("UICorner")
+        badgeCorner.CornerRadius = UDim.new(0, 4)
+        badgeCorner.Parent = currentBadge
+    end
+    
     -- Server Info
     local serverName = Instance.new("TextLabel")
     serverName.Size = UDim2.new(0.6, 0, 0, 30)
-    serverName.Position = UDim2.new(0, 10, 0, 5)
+    serverName.Position = UDim2.new(0, 10, 0, 30)
     serverName.BackgroundTransparency = 1
     serverName.Text = "🌍 Server: " .. serverData.id:sub(1, 8) .. "..."
     serverName.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -251,7 +583,7 @@ local function createServerCard(parent, serverData, petName)
     -- Pet Found Info
     local petInfo = Instance.new("TextLabel")
     petInfo.Size = UDim2.new(0.6, 0, 0, 20)
-    petInfo.Position = UDim2.new(0, 10, 0, 35)
+    petInfo.Position = UDim2.new(0, 10, 0, 55)
     petInfo.BackgroundTransparency = 1
     petInfo.Text = "🐾 Found: " .. petName
     petInfo.TextColor3 = Color3.fromRGB(50, 255, 50)
@@ -263,7 +595,7 @@ local function createServerCard(parent, serverData, petName)
     -- Players Info
     local playersInfo = Instance.new("TextLabel")
     playersInfo.Size = UDim2.new(0.6, 0, 0, 20)
-    playersInfo.Position = UDim2.new(0, 10, 0, 55)
+    playersInfo.Position = UDim2.new(0, 10, 0, 75)
     playersInfo.BackgroundTransparency = 1
     playersInfo.Text = "👥 Players: " .. serverData.playing .. "/" .. serverData.maxPlayers
     playersInfo.TextColor3 = Color3.fromRGB(200, 200, 200)
@@ -288,6 +620,12 @@ local function createServerCard(parent, serverData, petName)
     joinCorner.CornerRadius = UDim.new(0, 8)
     joinCorner.Parent = joinButton
     
+    -- Disable join button for current server
+    if serverData.id == game.JobId then
+        joinButton.Text = "HERE"
+        joinButton.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+    end
+    
     -- Glow effect on hover
     local glow = Instance.new("ImageLabel")
     glow.Size = UDim2.new(1, 20, 1, 20)
@@ -300,42 +638,59 @@ local function createServerCard(parent, serverData, petName)
     glow.Parent = joinButton
     
     joinButton.MouseEnter:Connect(function()
-        glow.Visible = true
-        joinButton.BackgroundColor3 = Color3.fromRGB(70, 255, 70)
+        if serverData.id ~= game.JobId then
+            glow.Visible = true
+            joinButton.BackgroundColor3 = Color3.fromRGB(70, 255, 70)
+        end
     end)
     
     joinButton.MouseLeave:Connect(function()
-        glow.Visible = false
-        joinButton.BackgroundColor3 = Color3.fromRGB(50, 200, 50)
+        if serverData.id ~= game.JobId then
+            glow.Visible = false
+            joinButton.BackgroundColor3 = Color3.fromRGB(50, 200, 50)
+        end
     end)
     
     joinButton.MouseButton1Click:Connect(function()
-        joinButton.Text = "JOINING..."
-        joinButton.BackgroundColor3 = Color3.fromRGB(255, 150, 50)
-        
-        pcall(function()
-            TeleportService:TeleportToPlaceInstance(game.PlaceId, serverData.id, player)
-        end)
+        if serverData.id ~= game.JobId then
+            joinButton.Text = "JOINING..."
+            joinButton.BackgroundColor3 = Color3.fromRGB(255, 150, 50)
+            
+            pcall(function()
+                TeleportService:TeleportToPlaceInstance(game.PlaceId, serverData.id, player)
+            end)
+        end
     end)
     
-    return card
-end
-
--- Функция для проверки сервера на наличие питомцев
-local function checkServerForPets(serverId)
-    -- Здесь должна быть логика проверки сервера
-    -- Так как мы не можем напрямую проверить другие сервера, используем симуляцию
-    -- В реальном сценарии вам нужно использовать ваш метод проверки
-    
-    -- Имитация нахождения питомца (в реальности здесь должен быть ваш код проверки)
-    local randomPet = CONFIG.PETS_TO_FIND[math.random(1, #CONFIG.PETS_TO_FIND)]
-    local foundRandom = math.random(1, 100) <= 30 -- 30% шанс найти питомца
-    
-    if foundRandom then
-        return randomPet
+    -- Buy Pet Button (только для текущего сервера)
+    if serverData.id == game.JobId then
+        local buyButton = Instance.new("TextButton")
+        buyButton.Size = UDim2.new(0, 100, 0, 30)
+        buyButton.Position = UDim2.new(0.75, 0, 0.7, 0)
+        buyButton.BackgroundColor3 = Color3.fromRGB(255, 200, 50)
+        buyButton.Text = "BUY PET"
+        buyButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        buyButton.Font = Enum.Font.GothamBold
+        buyButton.TextSize = 14
+        buyButton.BorderSizePixel = 0
+        buyButton.Parent = card
+        
+        local buyCorner = Instance.new("UICorner")
+        buyCorner.CornerRadius = UDim.new(0, 8)
+        buyCorner.Parent = buyButton
+        
+        buyButton.MouseButton1Click:Connect(function()
+            buyButton.Text = "BUYING..."
+            teleportToPet(petName)
+            wait(0.5)
+            purchasePet()
+            buyButton.Text = "BOUGHT!"
+            wait(1)
+            buyButton.Text = "BUY PET"
+        end)
     end
     
-    return nil
+    return card
 end
 
 -- Функция получения списка серверов
@@ -355,7 +710,7 @@ local function getServers()
             
             if data and data.data then
                 for _, server in pairs(data.data) do
-                    if server.playing < server.maxPlayers and server.id ~= game.JobId then
+                    if server.playing < server.maxPlayers then
                         table.insert(servers, server)
                     end
                 end
@@ -363,12 +718,30 @@ local function getServers()
         end
     end)
     
+    -- Добавляем текущий сервер если его нет в списке
+    local currentServerInList = false
+    for _, server in pairs(servers) do
+        if server.id == game.JobId then
+            currentServerInList = true
+            break
+        end
+    end
+    
+    if not currentServerInList then
+        table.insert(servers, 1, {
+            id = game.JobId,
+            playing = #Players:GetPlayers(),
+            maxPlayers = Players.MaxPlayers
+        })
+    end
+    
     return servers
 end
 
 -- Функция обновления списка серверов
 local function updateServersList(uiElements)
-    uiElements.statusLabel.Text = "🔍 Scanning " .. CONFIG.MAX_SERVERS_TO_SCAN .. " servers..."
+    uiElements.statusLabel.Text = "🔍 Scanning servers..."
+    currentServerScanned = false
     
     -- Очищаем старый список
     for _, child in pairs(uiElements.serversFrame:GetChildren()) do
@@ -377,115 +750,89 @@ local function updateServersList(uiElements)
         end
     end
     
+    -- Сканируем текущий сервер на питомцев
+    local currentPets = findPetsOnCurrentServer()
+    currentServerScanned = true
+    
     local servers = getServers()
     local serversWithPets = {}
     
-    -- Проверяем каждый сервер
-    for _, server in pairs(servers) do
-        local foundPet = checkServerForPets(server.id)
-        if foundPet then
-            table.insert(serversWithPets, {
-                server = server,
-                pet = foundPet
-            })
+    -- Проверяем текущий сервер
+    if #currentPets > 0 then
+        for _, server in pairs(servers) do
+            if server.id == game.JobId then
+                for _, pet in pairs(currentPets) do
+                    table.insert(serversWithPets, {
+                        server = server,
+                        pet = pet
+                    })
+                end
+                break
+            end
         end
     end
     
-    -- Сортируем по редкости питомца (приоритет)
-    table.sort(serversWithPets, function(a, b)
+    -- Проверяем кэшированные сервера
+    for _, server in pairs(servers) do
+        if server.id ~= game.JobId and serverCache[server.id] and serverCache[server.id].pets then
+            if os.time() - serverCache[server.id].timestamp < 300 then -- 5 минут
+                for _, pet in pairs(serverCache[server.id].pets) do
+                    table.insert(serversWithPets, {
+                        server = server,
+                        pet = pet
+                    })
+                end
+            end
+        end
+    end
+    
+    -- Удаляем дубликаты
+    local uniqueServers = {}
+    local seenServers = {}
+    
+    for _, data in pairs(serversWithPets) do
+        local key = data.server.id .. "_" .. data.pet
+        if not seenServers[key] then
+            seenServers[key] = true
+            table.insert(uniqueServers, data)
+        end
+    end
+    
+    -- Сортируем: текущий сервер первый, потом по приоритету питомцев
+    table.sort(uniqueServers, function(a, b)
+        if a.server.id == game.JobId then return true end
+        if b.server.id == game.JobId then return false end
+        
         local priorityA = table.find(CONFIG.PETS_TO_FIND, a.pet) or 999
         local priorityB = table.find(CONFIG.PETS_TO_FIND, b.pet) or 999
         return priorityA < priorityB
     end)
     
     -- Обновляем UI
-    if #serversWithPets > 0 then
-        uiElements.statusLabel.Text = "✅ Found " .. #serversWithPets .. " servers with pets!"
+    if #uniqueServers > 0 then
+        uiElements.statusLabel.Text = "✅ Found " .. #currentPets .. " pets on current server! (" .. #uniqueServers .. " total)"
         
-        for _, data in pairs(serversWithPets) do
+        for _, data in pairs(uniqueServers) do
             createServerCard(uiElements.serversFrame, data.server, data.pet)
+        end
+        
+        -- Автоматическая покупка если включена и мы на текущем сервере
+        if uiElements.getAutoBuyEnabled() and #currentPets > 0 then
+            uiElements.statusLabel.Text = "🎯 Auto-buying " .. currentPets[1] .. "..."
+            
+            for _, pet in pairs(currentPets) do
+                teleportToPet(pet)
+                wait(0.5)
+                purchasePet()
+                wait(0.5)
+            end
         end
         
         -- Автоматическое присоединение если включено
         if uiElements.getAutoJoinEnabled() then
-            local bestServer = serversWithPets[1]
-            uiElements.statusLabel.Text = "🚀 Auto-joining server with " .. bestServer.pet .. "..."
-            
-            wait(1)
-            pcall(function()
-                TeleportService:TeleportToPlaceInstance(game.PlaceId, bestServer.server.id, player)
-            end)
-        end
-    else
-        uiElements.statusLabel.Text = "❌ No servers with pets found. Scanning again..."
-        
-        -- Показываем сообщение что нет серверов
-        local noServersLabel = Instance.new("TextLabel")
-        noServersLabel.Size = UDim2.new(1, -20, 0, 50)
-        noServersLabel.Position = UDim2.new(0, 10, 0, 10)
-        noServersLabel.BackgroundTransparency = 1
-        noServersLabel.Text = "😔 No servers with pets found\nTry refreshing or wait for scan"
-        noServersLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
-        noServersLabel.Font = Enum.Font.Gotham
-        noServersLabel.TextSize = 14
-        noServersLabel.TextWrapped = true
-        noServersLabel.Parent = uiElements.serversFrame
-    end
-end
-
--- Функция для Discord уведомлений
-local function sendDiscordNotification(petName, serverData)
-    if CONFIG.DISCORD_WEBHOOK == "" then return end
-    
-    local requestData = {
-        content = "",
-        embeds = {{
-            title = "🐾 Pet Found on Server!",
-            description = string.format(
-                "**Pet:** %s\n**Server ID:** %s\n**Players:** %d/%d\n**Time:** %s",
-                petName,
-                serverData.id,
-                serverData.playing,
-                serverData.maxPlayers,
-                os.date("%Y-%m-%d %H:%M:%S")
-            ),
-            color = 65280,
-            footer = {text = "Grow A Garden 2 - Pet Finder"}
-        }}
-    }
-    
-    pcall(function()
-        syn.request({
-            Url = CONFIG.DISCORD_WEBHOOK,
-            Method = "POST",
-            Headers = {["Content-Type"] = "application/json"},
-            Body = HttpService:JSONEncode(requestData)
-        })
-    end)
-end
-
--- Главная функция
-local function main()
-    local uiElements = createUI()
-    
-    -- Обновление при нажатии на Refresh
-    uiElements.refreshButton.MouseButton1Click:Connect(function()
-        uiElements.refreshButton.Text = "🔄 Scanning..."
-        updateServersList(uiElements)
-        uiElements.refreshButton.Text = "🔄 Refresh"
-    end)
-    
-    -- Автоматическое сканирование при запуске
-    updateServersList(uiElements)
-    
-    -- Периодическое обновление
-    while uiElements.screenGui and uiElements.screenGui.Parent do
-        wait(CONFIG.SCAN_INTERVAL)
-        pcall(function()
-            updateServersList(uiElements)
-        end)
-    end
-end
-
--- Запуск
-main()
+            for _, data in pairs(uniqueServers) do
+                if data.server.id ~= game.JobId then
+                    uiElements.statusLabel.Text = "🚀 Auto-joining server with " .. data.pet .. "..."
+                    wait(1)
+                    pcall(function()
+                        TeleportService:TeleportToPlaceInstance(game.PlaceId, data.server.id,
