@@ -1,6 +1,3 @@
-Я заменю функцию `checkServerForPets` на реальную логику проверки серверов. Поскольку мы не можем напрямую сканировать другие сервера, я сделаю систему, которая будет сканировать ТЕКУЩИЙ сервер на наличие питомцев, и если находит - добавляет его в список. Также добавлю систему кэширования серверов.
-
-```lua
 --[[
     Grow A Garden 2 - Server & Pet Finder UI
     Ищет сервера с питомцами: Bear, Unicorn, Golden Dragonfly, Raccon
@@ -12,8 +9,7 @@ local CONFIG = {
         "Bear",
         "Unicorn", 
         "Golden Dragonfly",
-        "Raccon",
-        "Bunny"
+        "Raccon"
     },
     SCAN_INTERVAL = 5,
     MAX_SERVERS_TO_SCAN = 50,
@@ -836,4 +832,96 @@ local function updateServersList(uiElements)
                     uiElements.statusLabel.Text = "🚀 Auto-joining server with " .. data.pet .. "..."
                     wait(1)
                     pcall(function()
-                        TeleportService:TeleportToPlaceInstance(game.PlaceId, data.server.id,
+                        TeleportService:TeleportToPlaceInstance(game.PlaceId, data.server.id, player)
+                    end)
+                    break
+                end
+            end
+        end
+    else
+        uiElements.statusLabel.Text = "❌ No pets found. Click Server Hop to find new servers"
+        
+        -- Показываем сообщение что нет серверов
+        local noServersLabel = Instance.new("TextLabel")
+        noServersLabel.Size = UDim2.new(1, -20, 0, 50)
+        noServersLabel.Position = UDim2.new(0, 10, 0, 10)
+        noServersLabel.BackgroundTransparency = 1
+        noServersLabel.Text = "😔 No pets found on current server\nClick 'Server Hop' to find new servers"
+        noServersLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+        noServersLabel.Font = Enum.Font.Gotham
+        noServersLabel.TextSize = 14
+        noServersLabel.TextWrapped = true
+        noServersLabel.Parent = uiElements.serversFrame
+    end
+end
+
+-- Функция для Discord уведомлений
+local function sendDiscordNotification(petName, serverData)
+    if CONFIG.DISCORD_WEBHOOK == "" then return end
+    
+    local requestData = {
+        content = "",
+        embeds = {{
+            title = "🐾 Pet Found on Server!",
+            description = string.format(
+                "**Pet:** %s\n**Server ID:** %s\n**Players:** %d/%d\n**Time:** %s",
+                petName,
+                serverData.id,
+                serverData.playing,
+                serverData.maxPlayers,
+                os.date("%Y-%m-%d %H:%M:%S")
+            ),
+            color = 65280,
+            footer = {text = "Grow A Garden 2 - Pet Finder"}
+        }}
+    }
+    
+    pcall(function()
+        syn.request({
+            Url = CONFIG.DISCORD_WEBHOOK,
+            Method = "POST",
+            Headers = {["Content-Type"] = "application/json"},
+            Body = HttpService:JSONEncode(requestData)
+        })
+    end)
+end
+
+-- Сохранение кэша при смене сервера
+player.OnTeleport:Connect(function()
+    -- Сохраняем данные о текущем сервере перед телепортацией
+    local currentPets = findPetsOnCurrentServer()
+    if #currentPets > 0 then
+        serverCache[game.JobId] = {
+            pets = currentPets,
+            players = #Players:GetPlayers(),
+            maxPlayers = Players.MaxPlayers,
+            timestamp = os.time()
+        }
+    end
+end)
+
+-- Главная функция
+local function main()
+    local uiElements = createUI()
+    
+    -- Обновление при нажатии на Refresh
+    uiElements.refreshButton.MouseButton1Click:Connect(function()
+        uiElements.refreshButton.Text = "🔄 Scanning..."
+        updateServersList(uiElements)
+        uiElements.refreshButton.Text = "🔄 Refresh"
+    end)
+    
+    -- Автоматическое сканирование при запуске
+    updateServersList(uiElements)
+    
+    -- Периодическое обновление
+    while uiElements.screenGui and uiElements.screenGui.Parent do
+        wait(CONFIG.SCAN_INTERVAL)
+        pcall(function()
+            updateServersList(uiElements)
+        end)
+    end
+end
+
+-- Запуск
+main()
